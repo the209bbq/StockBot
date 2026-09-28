@@ -1,0 +1,29 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local runtime state — never commit secrets or live DBs
+data/*.db
+data/*.db-journal
+.killswitch
+KILL_SWITCH
+
+# Generated backtest artifacts (the committed fixture cache is tests/fixtures/data_cache/)
+/results.csv
+/equity_curves.png
+/data_info.json
+/data_cache/
+*.png
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
