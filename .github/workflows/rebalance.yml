@@ -47,12 +47,16 @@ jobs:
         run: |
           set +x
           mkdir -p data
-          git fetch origin bot-state --depth=1
-          if git cat-file -e origin/bot-state:data/trader.db 2>/dev/null; then
-            git show origin/bot-state:data/trader.db > data/trader.db
-            echo "Restored data/trader.db from origin/bot-state"
+          if git ls-remote --exit-code --heads origin bot-state >/dev/null 2>&1; then
+            git fetch origin bot-state --depth=1
+            if git cat-file -e origin/bot-state:data/trader.db 2>/dev/null; then
+              git show origin/bot-state:data/trader.db > data/trader.db
+              echo "Restored data/trader.db from origin/bot-state"
+            else
+              echo "origin/bot-state has no data/trader.db yet (first run is fine)"
+            fi
           else
-            echo "No data/trader.db on origin/bot-state yet (first run is fine)"
+            echo "No origin/bot-state branch yet (first run is fine)"
           fi
       - name: Confirm paper keys exist (do not print values)
         env:
