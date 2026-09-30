@@ -107,14 +107,28 @@ def simulate(prices, target, variant, cfg, sma=None, signal_px=None):
     fund_trades = 0
     log = []
 
+    min_n = float(cfg.get("min_trade_notional") or 0.0)
+    cash_buf = float(cfg.get("cash_buffer_usd") or 0.0)
+
     def trade_to(hold, w_target, day):
         nonlocal total_cost, trades_events, fund_trades
         V = hold.sum()
-        desired = w_target * V
+        buf = min(cash_buf, V) if cash_buf > 0 else 0.0
+        desired = w_target * (V - buf)
+        if min_n > 0:
+            skip = np.abs(desired - hold) < min_n
+            if skip.all():
+                return hold
+            desired = np.where(skip, hold, desired)
         turnover = np.abs(desired - hold).sum()
+        if turnover <= 1e-12:
+            return hold
         cost = turnover * slip
         V_net = V - cost
-        new = w_target * V_net
+        if desired.sum() > 0:
+            new = desired * (V_net / desired.sum())
+        else:
+            new = desired
         total_cost += cost
         trades_events += 1
         fund_trades += int((np.abs(new - hold) > 1e-6).sum())
@@ -265,12 +279,21 @@ def main():
     ap.add_argument("--refresh", action="store_true", help="Re-download prices.")
     ap.add_argument("--cache-dir", default=None)
     ap.add_argument("--out-dir", default=None)
+    ap.add_argument("--start-capital", type=float, default=None)
+    ap.add_argument("--min-trade", type=float, default=None, help="Skip legs below this notional.")
+    ap.add_argument("--cash-buffer", type=float, default=None)
     a = ap.parse_args()
     cfg = dict(CONFIG)
     if a.out_dir:
         cfg["out_dir"] = a.out_dir
     if a.cache_dir:
         cfg["cache_dir"] = a.cache_dir
+    if a.start_capital is not None:
+        cfg["start_capital"] = a.start_capital
+    if a.min_trade is not None:
+        cfg["min_trade_notional"] = a.min_trade
+    if a.cash_buffer is not None:
+        cfg["cash_buffer_usd"] = a.cash_buffer
     refresh = a.refresh and not a.offline
     keys = ["etf", "proxy"] if a.universe == "all" else [a.universe]
     all_rows, curves_by_u, infos = [], {}, []

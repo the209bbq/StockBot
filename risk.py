@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from config import Config
 from rebalance import OrderIntent
 
 
@@ -35,6 +36,14 @@ def order_notional(order: OrderIntent) -> float:
 
 def turnover_notional(orders: list[OrderIntent]) -> float:
     return sum(order_notional(o) for o in orders)
+
+
+def scaled_order_cap(managed_equity: float, cfg: Config) -> float:
+    """Max single-order notional: pct of managed sleeve, plus optional hard ceiling."""
+    cap = max(0.0, managed_equity) * float(cfg.risk.max_order_notional_pct)
+    if cfg.risk.max_order_notional is not None:
+        cap = min(cap, float(cfg.risk.max_order_notional))
+    return cap
 
 
 def check_orders(

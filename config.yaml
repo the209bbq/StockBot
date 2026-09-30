@@ -21,15 +21,21 @@ trend_filter:
   signal_ticker: VTI
   risk_off_ticker: BND
 
-# Leave a little cash uninvested so tiny drifts and settlement don't
-# force trades, and skip legs smaller than min_trade_notional.
-cash_buffer_pct: 0.01
-min_trade_notional: 50.0
+# Paper account is $100k; only this much is the bot's sleeve. Surplus cash
+# is ignored. Existing VTI/VXUS/BND lots can grow with the market; we never
+# pull more than the cap from unmanaged cash.
+capital_cap_usd: 100.0
+
+# Alpaca fractional minimum is $1 notional. Keep ~$1 uninvested.
+cash_buffer_usd: 1.0
+cash_buffer_pct: 0.0
+min_trade_notional: 1.0
 
 risk:
-  # Dollar cap on a single order. Full risk-off rotations can be large.
-  max_order_notional: 200000.0
-  # Combined |buy| + |sell| notional / equity. 2.0 allows a 100% rotation.
+  # Both caps are fractions of *managed* (capped) equity, so they scale
+  # down to the $100 sleeve. 1.0 = one order can be the whole sleeve;
+  # 2.0 = a full sell+buy rotation is allowed.
+  max_order_notional_pct: 1.0
   max_daily_turnover_pct: 2.0
   kill_switch_file: .killswitch
 

@@ -312,7 +312,7 @@ class MockBroker:
         prices: dict[str, float] | None = None,
         daily_closes: dict[str, pd.Series] | None = None,
     ) -> None:
-        self.positions = positions or drifted_demo_positions()
+        self.positions = drifted_demo_positions() if positions is None else positions
         self.prices = prices or {s: p.current_price for s, p in self.positions.items()}
         pos_value = sum(p.market_value for p in self.positions.values())
         self.account = AccountSnapshot(
