@@ -18,7 +18,7 @@ Configured in [`config.yaml`](config.yaml) (`strategy: qqq_momentum`):
 | Orders | Fractional notional (buy) / qty (sell), market, **$1 minimum** |
 | Data | Alpaca daily bars when the paper key can fetch them; otherwise yfinance. The run log records `price_source` |
 
-The scheduler should fire at **both** 19:50 UTC (EDT) and 20:50 UTC (EST). The bot converts to Eastern time, asks Alpaca's clock/calendar, and skips weekends, holidays, early closes (session close before 15:30 ET), and the DST hour that is not 15:50 ET.
+The GitHub Actions schedule fires at **both** 19:50 UTC (EDT) and 20:50 UTC (EST). The bot converts to Eastern time, asks Alpaca's clock/calendar, and skips weekends, holidays, the DST hour that is not 15:50 ET, and a second fire the same session (`last_live_session`). Early-close days (session close before 15:30 ET) are **skipped** by those 15:50 ET crons; if a run happens to land in the window just before the early close, it evaluates then instead. The skip reason is written to `reports/latest.json`.
 
 ## Capital cap
 
@@ -40,7 +40,7 @@ Set `strategy: etf_rebalance` to use the original month-end 55/25/20 VTI/VXUS/BN
 - **Risk gates** in `risk.py`: kill switch, $1 min, never more than cap+sleeve P&L, max daily sleeve loss.
 - **Idempotent** `client_order_id` values so a retry of the same day/symbol/side/size does not double-send.
 - **Retries with backoff** on 429 / 5xx.
-- **Default `--dry-run`**: print the plan, persist it as `dry_run` rows, **submit nothing**. A dry-run does **not** open or close the stored live position.
+- **Default `--dry-run`**: print the plan, persist it as `dry_run` rows, **submit nothing**. A dry-run does **not** open a live position and does **not** start the $100 QQQ buy-and-hold benchmark. The first `--paper --submit` run does.
 
 ## Setup
 
@@ -128,7 +128,19 @@ Optional alerts (no-op if unset): `DISCORD_WEBHOOK_URL`, or `NOTIFY_EMAIL_TO` + 
 ## Scheduler
 
 - Cron: [`scheduler/crontab.example`](scheduler/crontab.example) — dual UTC hours or `CRON_TZ=America/New_York`.
-- GitHub Actions: [`.github/workflows/rebalance.yml`](.github/workflows/rebalance.yml) — **`workflow_dispatch` + this-branch `push` only**. The dual-UTC `schedule:` block is commented out. There is **no submit input**.
+- GitHub Actions: [`.github/workflows/rebalance.yml`](.github/workflows/rebalance.yml)
+  - **Schedule** (weekdays 19:50 and 20:50 UTC): `python run.py --paper --submit`. Paper orders only. The session gate allows one trade per regular session.
+  - **`workflow_dispatch`**: defaults to **dry-run**. Choose `submit` to force a paper order off-hours.
+  - No `push` trigger. Pushes do not trade.
+
+After each successful run the `bot-state` branch gets `data/trader.db`, `reports/latest.json`, and `reports/weekly.md`. Fetch without opening SQLite:
+
+```
+https://raw.githubusercontent.com/the209bbq/StockBot/bot-state/reports/latest.json
+https://raw.githubusercontent.com/the209bbq/StockBot/bot-state/reports/weekly.md
+```
+
+A failed run fails the Actions job and does **not** persist new state.
 
 ## Tests
 
@@ -138,7 +150,7 @@ Offline, mocked broker, no API keys:
 pytest
 ```
 
-Coverage includes the QQQ entry signal, trailing stop, time exit, cap sizing, paper-only guard, kill switch, dry-run (no stored position), and the offline QQQ backtest.
+Coverage includes the QQQ entry signal, trailing stop, time exit, cap sizing, paper-only guard, kill switch, dry-run (no stored position / no benchmark), mocked submit, the once-per-session gate, and the offline QQQ backtest.
 
 ## Layout
 

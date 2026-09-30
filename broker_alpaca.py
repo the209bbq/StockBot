@@ -362,14 +362,20 @@ class MockBroker:
         return series.tail(limit)
 
     def submit_order(self, intent: OrderIntent, *, client_order_id: str) -> dict[str, Any]:
+        px = self.prices.get(intent.symbol) or 0.0
+        qty = intent.qty
+        if qty is None and px:
+            qty = (intent.notional or 0.0) / px
         record = {
             "id": f"mock-{len(self.submitted) + 1}",
             "client_order_id": client_order_id,
             "symbol": intent.symbol,
             "side": intent.side,
             "notional": intent.notional,
-            "qty": intent.qty,
+            "qty": qty,
             "status": "accepted",
+            "filled_qty": qty,
+            "filled_avg_price": px or None,
         }
         self.submitted.append(record)
         return record

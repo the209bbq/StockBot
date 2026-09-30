@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -14,6 +15,7 @@ from market_clock import evaluate_session, now_et, session_close_et
 from momentum import OpenPosition, decide, sleeve_mark, tradable_cash
 from notifier import Notifier
 from rebalance import Position
+from report import write_state_reports
 from risk import RiskError, check_momentum_risk, kill_switch_active, scaled_order_cap
 from store import Store, today_iso
 
@@ -69,6 +71,48 @@ def _calendar_days(broker: Any, as_of: date) -> tuple[list[date], Any | None]:
     return days, today_row
 
 
+def _reconcile_position(
+    *,
+    symbol: str,
+    day: str,
+    close: float | None,
+    qqq: Position | None,
+    stored: OpenPosition | None,
+    live_started: bool,
+) -> tuple[OpenPosition | None, list[str]]:
+    """Broker qty wins. Ignore leftover account QQQ until this sleeve has gone live."""
+    notes: list[str] = []
+    broker_long = qqq is not None and qqq.qty > 0
+    if not live_started:
+        if broker_long:
+            notes.append("ignoring broker QQQ; sleeve has not started live paper trading")
+        return None, notes
+    if stored and not broker_long:
+        notes.append("broker flat vs stored long; using broker (flat)")
+        return None, notes
+    if broker_long and stored is None:
+        notes.append("recovering sleeve position from broker (missing stored row)")
+        px = qqq.current_price or close or 0.0
+        return OpenPosition(symbol, qqq.qty, day, px, px), notes
+    if broker_long and stored is not None:
+        if abs(qqq.qty - stored.qty) > 1e-4:
+            notes.append(f"qty mismatch stored {stored.qty} vs broker {qqq.qty}; using broker")
+        return OpenPosition(
+            symbol=stored.symbol,
+            qty=qqq.qty,
+            entry_date=stored.entry_date,
+            entry_price=stored.entry_price,
+            high_close=stored.high_close,
+        ), notes
+    return None, notes
+
+
+def _finish(store: Store, result: dict[str, Any], reports_dir: str | Path) -> dict[str, Any]:
+    write_state_reports(store, result, reports_dir)
+    _print(result)
+    return result
+
+
 def run_momentum(
     cfg: Config,
     broker: Any,
@@ -80,10 +124,12 @@ def run_momentum(
     as_of: str | None = None,
     env: dict[str, str] | None = None,
     now: datetime | None = None,
+    reports_dir: str | Path = "reports",
 ) -> dict[str, Any]:
     environ = env if env is not None else {}
     mom = cfg.qqq_momentum
-    day = today_iso(as_of)
+    clock_now = now or now_et()
+    day = today_iso(as_of) if as_of else now_et(clock_now).date().isoformat()
     check_date = date.fromisoformat(day)
     result: dict[str, Any] = {
         "strategy": "qqq_momentum",
@@ -92,20 +138,20 @@ def run_momentum(
         "orders_submitted": False,
         "orders": [],
         "base_url": PAPER_BASE_URL,
+        "reconcile_mismatches": [],
     }
 
     if kill_switch_active(cfg.kill_switch_path, env=environ):
         result.update({"action": "blocked_kill_switch", "error": "kill switch is active"})
         notifier.notify("kill_switch", result["error"])
-        _print(result)
-        return result
+        return _finish(store, result, reports_dir)
 
     try:
         account = broker.get_account()
         positions = broker.get_positions()
     except Exception as exc:
         result.update({"auth": "failed", "error_type": type(exc).__name__, "error": str(exc)})
-        _print(result)
+        _finish(store, result, reports_dir)
         raise
     result["auth"] = "ok"
     result["account"] = {
@@ -125,12 +171,12 @@ def run_momentum(
         evaluate_et=mom.evaluate_et,
         window_minutes=mom.evaluate_window_minutes,
         skip_early_closes=mom.skip_early_closes,
-        now=now or now_et(),
+        now=clock_now,
         is_open=clock.get("is_open"),
         calendar_close=session_close_et(clock.get("next_close")) if clock.get("next_close") else None,
         calendar_row=cal_row,
         calendar_available=bool(cal_days),
-        force=force or dry_run,
+        force=force,
     )
     result["session"] = session.__dict__
 
@@ -138,30 +184,18 @@ def run_momentum(
     result["price_source"] = source
     close = float(closes.iloc[-1]) if closes is not None and not closes.empty else None
 
-    qqq = positions.get(mom.symbol)
-    stored = store.get_open_position()
-    # Broker is source of truth for whether we are long. Stored row holds entry/high.
-    if qqq is not None and qqq.qty > 0:
-        if stored is None:
-            stored = OpenPosition(
-                symbol=mom.symbol,
-                qty=qqq.qty,
-                entry_date=day,
-                entry_price=qqq.current_price or close or 0.0,
-                high_close=qqq.current_price or close or 0.0,
-            )
-        else:
-            stored = OpenPosition(
-                symbol=stored.symbol,
-                qty=qqq.qty,
-                entry_date=stored.entry_date,
-                entry_price=stored.entry_price,
-                high_close=stored.high_close,
-            )
-    else:
-        stored = None
+    live = store.is_live_started()
+    stored, mismatches = _reconcile_position(
+        symbol=mom.symbol,
+        day=day,
+        close=close,
+        qqq=positions.get(mom.symbol),
+        stored=store.get_open_position() if live else None,
+        live_started=live,
+    )
+    result["reconcile_mismatches"] = mismatches
 
-    realized = store.get_realized_pnl()
+    realized = store.get_realized_pnl() if live else 0.0
     tradable = tradable_cash(capital_cap_usd=cfg.capital_cap_usd, realized_pnl=realized)
     cash_sleeve = tradable if stored is None else 0.0
     mark = sleeve_mark(position=stored, close=close or 0.0, cash=cash_sleeve)
@@ -173,21 +207,35 @@ def run_momentum(
         "in_position": stored is not None,
     }
 
-    prices = {mom.symbol: close} if close else {}
-    store.init_benchmark_if_needed(day, cfg.capital_cap_usd, prices, {mom.symbol: 1.0})
-    store.mark_benchmark(day, prices)
-    sleeve_pos = {}
-    if stored and close:
-        sleeve_pos[mom.symbol] = Position(
-            mom.symbol, stored.qty, stored.qty * close, stored.entry_price, close
-        )
-    store.snapshot_equity(day, mark, cash_sleeve, sleeve_pos)
-
-    if session.skip_reason and not force and not dry_run:
+    if session.skip_reason and not force:
         result["action"] = "skipped"
         result["reason"] = session.skip_reason
-        _print(result)
-        return result
+        if session.skip_reason == "early_close":
+            result["early_close_note"] = (
+                f"Early close at {session.next_close_et} ET; "
+                f"policy={session.early_close_policy}. "
+                "The 19:50/20:50 UTC crons fire at 15:50 ET, so this session is skipped."
+            )
+        return _finish(store, result, reports_dir)
+
+    if not dry_run and not force and store.last_live_session() == day:
+        result["action"] = "skipped"
+        result["reason"] = "already_evaluated"
+        return _finish(store, result, reports_dir)
+
+    prices = {mom.symbol: close} if close else {}
+    if not dry_run:
+        if not store.is_live_started():
+            store.reset_dry_run_live_state()
+            store.mark_live_started(day)
+        store.init_benchmark_if_needed(day, cfg.capital_cap_usd, prices, {mom.symbol: 1.0})
+        store.mark_benchmark(day, prices)
+        sleeve_pos = {}
+        if stored and close:
+            sleeve_pos[mom.symbol] = Position(
+                mom.symbol, stored.qty, stored.qty * close, stored.entry_price, close
+            )
+        store.snapshot_equity(day, mark, cash_sleeve, sleeve_pos)
 
     decision = decide(
         closes=closes,
@@ -220,7 +268,7 @@ def run_momentum(
             tradable=tradable,
             max_order_notional=scaled_order_cap(tradable, cfg),
             max_daily_loss_pct=cfg.risk.max_daily_loss_pct,
-            realized_pnl_today=store.realized_pnl_on(day),
+            realized_pnl_today=store.realized_pnl_on(day) if not dry_run else 0.0,
             kill_switch_path=cfg.kill_switch_path,
             env=environ,
         )
@@ -228,8 +276,9 @@ def run_momentum(
         result["action"] = "blocked_risk"
         result["error"] = str(exc)
         notifier.notify("risk", str(exc))
-        _print(result)
-        return result
+        if not dry_run:
+            store.set_last_live_session(day)
+        return _finish(store, result, reports_dir)
 
     if decision.order is None:
         if stored and close and not dry_run:
@@ -242,9 +291,10 @@ def run_momentum(
                     high_close=max(stored.high_close, close),
                 )
             )
+        if not dry_run:
+            store.set_last_live_session(day)
         result["action"] = decision.action
-        _print(result)
-        return result
+        return _finish(store, result, reports_dir)
 
     cid = make_client_order_id(day, decision.order.symbol, decision.order.side, decision.order.notional)
     if dry_run:
@@ -260,10 +310,20 @@ def run_momentum(
         )
         result["action"] = "dry_run"
         result["orders_submitted"] = False
-        _print(result)
-        return result
+        return _finish(store, result, reports_dir)
 
-    rec = broker.submit_order(decision.order, client_order_id=cid)
+    if store.live_order_exists(cid):
+        result["action"] = "idempotent_skip"
+        result["reason"] = "client_order_id already submitted"
+        store.set_last_live_session(day)
+        return _finish(store, result, reports_dir)
+
+    existing = None
+    try:
+        existing = broker.get_order_by_client_id(cid)
+    except Exception:
+        existing = None
+    rec = existing or broker.submit_order(decision.order, client_order_id=cid)
     store.record_order(
         client_order_id=cid,
         symbol=decision.order.symbol,
@@ -310,8 +370,8 @@ def run_momentum(
                 reason=decision.reason,
             )
         store.clear_open_position()
+    store.set_last_live_session(day)
     result["action"] = "submitted"
     result["orders_submitted"] = True
     result["submitted"] = rec
-    _print(result)
-    return result
+    return _finish(store, result, reports_dir)

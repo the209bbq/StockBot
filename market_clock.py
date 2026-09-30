@@ -21,6 +21,7 @@ class SessionInfo:
     near_close: bool
     next_close_et: str | None
     skip_reason: str | None
+    early_close_policy: str | None = None  # evaluate_before_close | skip | None
 
 
 def _parse_hhmm(value: str) -> time:
@@ -97,11 +98,23 @@ def evaluate_session(
     window_end = window_start + timedelta(minutes=window_minutes)
     near = window_start <= current <= window_end
 
+    early_policy = None
+    if early:
+        close_dt = datetime.combine(current.date(), close_t, tzinfo=ET)
+        early_start = close_dt - timedelta(minutes=max(window_minutes, 10))
+        if early_start <= current <= close_dt:
+            early_policy = "evaluate_before_close"
+            near = True
+        else:
+            early_policy = "skip"
+
     skip = None
     if force:
         skip = None
     elif not is_trading_day:
         skip = "not_a_trading_day"
+    elif early and early_policy == "evaluate_before_close":
+        skip = None
     elif skip_early_closes and early:
         skip = "early_close"
     elif current.date() != as_of:
@@ -119,4 +132,5 @@ def evaluate_session(
         near_close=bool(near or force),
         next_close_et=close_t.strftime("%H:%M"),
         skip_reason=None if force else skip,
+        early_close_policy=early_policy,
     )

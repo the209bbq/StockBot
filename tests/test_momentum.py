@@ -166,7 +166,16 @@ def test_momentum_kill_switch(cfg, store, tmp_path):
     from dataclasses import replace
 
     cfg = replace(cfg, risk=replace(cfg.risk, kill_switch_file=str(ks)))
-    result = run_momentum(cfg, MockBroker(positions={}), store, NullNotifier(), dry_run=False, force=True, env={})
+    result = run_momentum(
+        cfg,
+        MockBroker(positions={}),
+        store,
+        NullNotifier(),
+        dry_run=False,
+        force=True,
+        env={},
+        reports_dir=tmp_path / "reports",
+    )
     assert result["action"] == "blocked_kill_switch"
 
 
@@ -222,7 +231,7 @@ def test_paper_guard_still_rejects_live():
     assert LIVE_TRADING_MESSAGE
 
 
-def test_run_momentum_dry_run_does_not_open_stored_position(cfg, store):
+def test_run_momentum_dry_run_does_not_open_stored_position(cfg, store, tmp_path):
     closes = _closes([100.0] * 20 + [120.0])
     broker = MockBroker(
         cash=100_000.0,
@@ -231,7 +240,9 @@ def test_run_momentum_dry_run_does_not_open_stored_position(cfg, store):
         prices={"QQQ": 120.0},
         daily_closes={"QQQ": closes},
     )
-    result = run_momentum(cfg, broker, store, NullNotifier(), dry_run=True, force=True, env={})
+    result = run_momentum(
+        cfg, broker, store, NullNotifier(), dry_run=True, force=True, env={}, reports_dir=tmp_path / "reports"
+    )
     assert result["action"] == "dry_run"
     assert result["orders_submitted"] is False
     assert result["orders"]
@@ -240,9 +251,13 @@ def test_run_momentum_dry_run_does_not_open_stored_position(cfg, store):
     assert result["managed"]["tradable"] == 100.0
     assert store.get_open_position() is None
     assert broker.submitted == []
+    assert not store.is_live_started()
+    assert store.inception_date() is None
+    assert store.equity_history() == []
+    assert store.benchmark_history() == []
 
 
-def test_run_momentum_submit_records_position(cfg, store):
+def test_run_momentum_submit_records_position_and_benchmark(cfg, store, tmp_path):
     closes = _closes([100.0] * 20 + [120.0])
     broker = MockBroker(
         cash=100_000.0,
@@ -251,14 +266,125 @@ def test_run_momentum_submit_records_position(cfg, store):
         prices={"QQQ": 120.0},
         daily_closes={"QQQ": closes},
     )
-    result = run_momentum(cfg, broker, store, NullNotifier(), dry_run=False, force=True, env={})
+    result = run_momentum(
+        cfg, broker, store, NullNotifier(), dry_run=False, force=True, env={}, reports_dir=tmp_path / "reports"
+    )
     assert result["action"] == "submitted"
+    assert result["orders_submitted"] is True
+    assert broker.submitted
     pos = store.get_open_position()
     assert pos is not None
     assert pos.symbol == "QQQ"
+    assert store.is_live_started()
+    assert store.inception_date() == result["as_of"]
+    assert store.benchmark_history()
+    assert (tmp_path / "reports" / "latest.json").exists()
+    payload = __import__("json").loads((tmp_path / "reports" / "latest.json").read_text())
+    assert payload["orders_submitted"] is True
+    assert payload["signal"]["close"] == 120.0
+    assert payload["signal"]["prior_20d_high"] == 100.0
 
 
-def test_run_momentum_ignores_account_equity(cfg, store):
+def test_first_live_run_resets_dry_run_benchmark(cfg, store, tmp_path):
+    store.init_benchmark_if_needed("2020-01-02", 100.0, {"QQQ": 50.0}, {"QQQ": 1.0})
+    store.snapshot_equity("2020-01-02", 99.0, 99.0, {})
+    closes = _closes([100.0] * 20 + [110.0])
+    broker = MockBroker(
+        cash=100_000.0,
+        equity=100_000.0,
+        positions={},
+        prices={"QQQ": 110.0},
+        daily_closes={"QQQ": closes},
+    )
+    result = run_momentum(
+        cfg, broker, store, NullNotifier(), dry_run=False, force=True, env={}, reports_dir=tmp_path / "reports"
+    )
+    assert store.is_live_started()
+    assert store.inception_date() == result["as_of"]
+    assert store.inception_date() != "2020-01-02"
+    assert all(s.as_of != "2020-01-02" for s in store.equity_history())
+
+
+def test_once_per_session_gate_skips_second_live_eval(cfg, store, tmp_path):
+    from types import SimpleNamespace
+    from datetime import time as dtime
+
+    day = date(2026, 9, 28)
+    closes = _closes([100.0] * 20 + [120.0], start="2026-08-28")
+    row = SimpleNamespace(date=day, close=dtime(16, 0))
+    broker = MockBroker(
+        cash=100_000.0,
+        equity=100_000.0,
+        positions={},
+        prices={"QQQ": 120.0},
+        daily_closes={"QQQ": closes},
+    )
+    broker.calendar_rows = [row]
+    now = datetime(2026, 9, 28, 15, 50, tzinfo=ET)
+    first = run_momentum(
+        cfg,
+        broker,
+        store,
+        NullNotifier(),
+        dry_run=False,
+        force=False,
+        as_of="2026-09-28",
+        now=now,
+        env={},
+        reports_dir=tmp_path / "r1",
+    )
+    assert first["action"] == "submitted"
+    assert len(broker.submitted) == 1
+    second = run_momentum(
+        cfg,
+        broker,
+        store,
+        NullNotifier(),
+        dry_run=False,
+        force=False,
+        as_of="2026-09-28",
+        now=now,
+        env={},
+        reports_dir=tmp_path / "r2",
+    )
+    assert second["action"] == "skipped"
+    assert second["reason"] == "already_evaluated"
+    assert len(broker.submitted) == 1
+
+
+def test_session_gate_skips_wrong_dst_hour_without_submitting(cfg, store, tmp_path):
+    from types import SimpleNamespace
+    from datetime import time as dtime
+
+    day = date(2026, 7, 15)
+    closes = _closes([100.0] * 20 + [120.0], start="2026-06-15")
+    broker = MockBroker(
+        cash=100_000.0,
+        equity=100_000.0,
+        positions={},
+        prices={"QQQ": 120.0},
+        daily_closes={"QQQ": closes},
+    )
+    broker.calendar_rows = [SimpleNamespace(date=day, close=dtime(16, 0))]
+    result = run_momentum(
+        cfg,
+        broker,
+        store,
+        NullNotifier(),
+        dry_run=False,
+        force=False,
+        as_of="2026-07-15",
+        now=datetime(2026, 7, 15, 20, 50, tzinfo=ZoneInfo("UTC")),
+        env={},
+        reports_dir=tmp_path / "reports",
+    )
+    assert result["action"] == "skipped"
+    assert result["reason"] == "outside_near_close_window"
+    assert broker.submitted == []
+    assert not store.is_live_started()
+
+
+def test_run_momentum_ignores_account_equity(cfg, store, tmp_path):
     closes = _closes([100.0] * 20 + [120.0])
     broker = MockBroker(
         cash=99_900.0,
@@ -267,7 +393,9 @@ def test_run_momentum_ignores_account_equity(cfg, store):
         prices={"QQQ": 120.0},
         daily_closes={"QQQ": closes},
     )
-    result = run_momentum(cfg, broker, store, NullNotifier(), dry_run=True, force=True, env={})
+    result = run_momentum(
+        cfg, broker, store, NullNotifier(), dry_run=True, force=True, env={}, reports_dir=tmp_path / "reports"
+    )
     assert result["orders"][0]["notional"] == 100.0
     assert result["account"]["equity"] == 100_000.0
     assert result["managed"]["equity"] == 100.0

@@ -303,6 +303,38 @@ class Store:
     def inception_date(self) -> str | None:
         return self.get_state("benchmark_start")
 
+    def is_live_started(self) -> bool:
+        return bool(self.get_state("live_started"))
+
+    def mark_live_started(self, as_of: str) -> None:
+        self.set_state("live_started", as_of)
+
+    def last_live_session(self) -> str | None:
+        return self.get_state("last_live_session")
+
+    def set_last_live_session(self, as_of: str) -> None:
+        self.set_state("last_live_session", as_of)
+
+    def live_order_exists(self, client_order_id: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM orders WHERE client_order_id = ? AND dry_run = 0 LIMIT 1",
+            (client_order_id,),
+        ).fetchone()
+        return bool(row)
+
+    def reset_dry_run_live_state(self) -> None:
+        """Drop dry-run equity/benchmark/position so the first live paper run is clean."""
+        self._conn.execute("DELETE FROM equity_snapshots")
+        self._conn.execute("DELETE FROM benchmark_snapshots")
+        for key in (
+            "benchmark_lots",
+            "benchmark_start",
+            "benchmark_start_equity",
+            "open_position",
+        ):
+            self._conn.execute("DELETE FROM strategy_state WHERE key = ?", (key,))
+        self._conn.commit()
+
     def get_realized_pnl(self) -> float:
         return float(self.get_state("realized_pnl") or 0.0)
 

@@ -15,6 +15,7 @@ data/*.db
 data/*.db-journal
 .killswitch
 KILL_SWITCH
+/reports/
 
 # Generated backtest artifacts (the committed fixture cache is tests/fixtures/data_cache/)
 /results.csv

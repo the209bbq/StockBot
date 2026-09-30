@@ -6,8 +6,8 @@
 # weekends/holidays/early closes via Alpaca's clock/calendar.
 #
 # Install: crontab -e  (edit paths / user first)
-# Switch to `--paper --submit` only after you have watched several dry-run
-# cycles against the paper account. Actions never submits.
+# After this PR is merged, GitHub Actions submits paper orders on the
+# weekday 19:50/20:50 UTC schedule. This host cron is optional.
 
 SHELL=/bin/bash
 PATH=/usr/bin:/bin:/usr/local/bin
