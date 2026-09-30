@@ -88,6 +88,58 @@ def _compare_etf_rows(got: pd.DataFrame, expected: pd.DataFrame) -> None:
         assert row["rebalances_g"] == row["rebalances_e"], f"{label} rebalances"
 
 
+def test_100_dollar_start_and_one_dollar_minimums():
+    """$100 start, unconstrained vs $1 min trade + $1 cash buffer, 80/20 full sample."""
+    if not all((CACHE_DIR / name).exists() for name in ["VTI.csv", "VXUS.csv", "BND.csv", "_IRX.csv"]):
+        raise AssertionError(f"offline price cache missing under {CACHE_DIR}")
+    from backtest import run_universe
+
+    base = dict(CONFIG)
+    base["out_dir"] = str(FIXTURE_DIR)
+    base["cache_dir"] = "data_cache"
+    base["start_capital"] = 100.0
+    rows_plain, _, _ = run_universe("etf", base, refresh=False)
+    capped = dict(base)
+    capped["min_trade_notional"] = 1.0
+    capped["cash_buffer_usd"] = 1.0
+    rows_min, _, _ = run_universe("etf", capped, refresh=False)
+
+    def _row(rows, variant):
+        for r in rows:
+            if r["universe"] == "ETF" and r["period"] == "full" and r["mix"] == "80/20" and r["variant"] == variant:
+                return r
+        raise AssertionError(variant)
+
+    labels = ["1 Buy&Hold", "2 Band5pp", "3 Band5pp+SMA200"]
+    expected_100k = pd.read_csv(EXPECTED_CSV)
+    for lab in labels:
+        p = _row(rows_plain, lab)
+        m = _row(rows_min, lab)
+        e = expected_100k[
+            (expected_100k["universe"] == "ETF")
+            & (expected_100k["period"] == "full")
+            & (expected_100k["mix"] == "80/20")
+            & (expected_100k["variant"] == lab)
+        ].iloc[0]
+        # Unconstrained $100 book is a linear scale of the $100k research run.
+        assert abs(p["CAGR_%"] - e["CAGR_%"]) <= 0.05
+        assert abs(p["maxDD_%"] - e["maxDD_%"]) <= 0.05
+        assert p["rebalances"] == e["rebalances"]
+        assert abs(p["final_value"] - e["final_value"] / 1000.0) <= 0.02
+        # Persist both rows on the result object for the report helper.
+        p["_min_cagr"] = m["CAGR_%"]
+        p["_min_dd"] = m["maxDD_%"]
+        p["_min_reb"] = m["rebalances"]
+        p["_min_cost"] = m["total_cost_$"]
+        p["_min_final"] = m["final_value"]
+
+    # $1 floors should not invent extra calendar rebalances on this sample.
+    for lab in labels:
+        p = _row(rows_plain, lab)
+        m = _row(rows_min, lab)
+        assert m["rebalances"] <= p["rebalances"] + 2
+
+
 def test_etf_results_match_attached_csv_within_rounding():
     """Replay the research backtest from cached adjusted closes."""
     if not EXPECTED_CSV.exists():

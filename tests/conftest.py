@@ -28,8 +28,8 @@ def mock_broker():
 
 @pytest.fixture
 def on_target_positions():
-    # 55 / 25 / 20 of the $99,000 investable book + $1,000 cash = $100,000 equity
-    specs = {"VTI": (54_450.0, 220.0), "VXUS": (24_750.0, 62.5), "BND": (19_800.0, 80.0)}
+    # 55 / 25 / 20 of the $99,999 investable book ($1 cash buffer) = $100,000
+    specs = {"VTI": (54_999.45, 220.0), "VXUS": (24_999.75, 62.5), "BND": (19_999.80, 80.0)}
     out = {}
     for symbol, (value, price) in specs.items():
         qty = value / price

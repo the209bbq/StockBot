@@ -27,8 +27,15 @@ from broker_alpaca import (
 )
 from config import Config, load_config
 from notifier import Notifier, build_notifier
-from rebalance import Position, plan_orders, portfolio_weights, reconcile
-from risk import RiskError, check_orders, kill_switch_active
+from rebalance import (
+    Position,
+    bot_positions_only,
+    managed_capital,
+    plan_orders,
+    portfolio_weights,
+    reconcile,
+)
+from risk import RiskError, check_orders, kill_switch_active, scaled_order_cap
 from store import Store, today_iso
 from strategy import decide
 
@@ -181,8 +188,23 @@ def run_rebalance(
         }
         for s, p in positions.items()
     }
+    sleeve = bot_positions_only(positions, cfg.symbols)
+    managed_equity, bot_cash, bot_mv = managed_capital(
+        positions=positions,
+        account_cash=account.cash,
+        symbols=cfg.symbols,
+        capital_cap_usd=cfg.capital_cap_usd,
+    )
+    result["managed"] = {
+        "capital_cap_usd": cfg.capital_cap_usd,
+        "equity": round(managed_equity, 2),
+        "cash": round(bot_cash, 2),
+        "bot_market_value": round(bot_mv, 2),
+        "min_trade_notional": cfg.min_trade_notional,
+        "cash_buffer_usd": cfg.cash_buffer_usd,
+    }
     stored = store.last_positions()
-    mismatches = reconcile(positions, stored) if stored else []
+    mismatches = reconcile(sleeve, bot_positions_only(stored, cfg.symbols)) if stored else []
     if mismatches:
         notifier.notify("reconcile", "Broker positions differ from last snapshot; using broker.", {"mismatches": mismatches})
         result["reconcile_mismatches"] = mismatches
@@ -192,7 +214,7 @@ def run_rebalance(
     for symbol, pos in positions.items():
         prices.setdefault(symbol, pos.current_price)
 
-    weights = portfolio_weights(positions, account.cash, account.equity)
+    weights = portfolio_weights(sleeve, bot_cash, managed_equity)
     signal_close = prices.get(cfg.trend_filter.signal_ticker)
     sma = None
     sma_source = None
@@ -259,8 +281,8 @@ def run_rebalance(
             result["decision"],
         )
 
-    store.snapshot_equity(day, account.equity, account.cash, positions)
-    store.init_benchmark_if_needed(day, account.equity, prices, cfg.target_weights)
+    store.snapshot_equity(day, managed_equity, bot_cash, sleeve)
+    store.init_benchmark_if_needed(day, managed_equity, prices, cfg.target_weights)
     store.mark_benchmark(day, prices)
     store.record_target(day, decision.target_weights, decision.risk_on, decision.reason)
 
@@ -279,9 +301,9 @@ def run_rebalance(
         return result
 
     orders = plan_orders(
-        positions=positions,
-        cash=account.cash,
-        equity=account.equity,
+        positions=sleeve,
+        cash=bot_cash,
+        equity=managed_equity,
         target_weights=decision.target_weights,
         prices=prices,
         cfg=cfg,
@@ -292,8 +314,8 @@ def run_rebalance(
     try:
         check_orders(
             orders,
-            equity=account.equity,
-            max_order_notional=cfg.risk.max_order_notional,
+            equity=managed_equity,
+            max_order_notional=scaled_order_cap(managed_equity, cfg),
             max_daily_turnover_pct=cfg.risk.max_daily_turnover_pct,
             already_traded_today=store.turnover_today(day),
             kill_switch_path=cfg.kill_switch_path,

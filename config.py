@@ -27,8 +27,9 @@ class TrendFilterConfig:
 
 @dataclass(frozen=True)
 class RiskLimits:
-    max_order_notional: float = 200_000.0
+    max_order_notional_pct: float = 1.0
     max_daily_turnover_pct: float = 2.0
+    max_order_notional: float | None = None
     kill_switch_file: str = ".killswitch"
 
 
@@ -48,8 +49,10 @@ class Config:
     )
     rebalance_band_pp: float = 5.0
     trend_filter: TrendFilterConfig = field(default_factory=TrendFilterConfig)
-    cash_buffer_pct: float = 0.01
-    min_trade_notional: float = 50.0
+    capital_cap_usd: float | None = 100.0
+    cash_buffer_usd: float = 1.0
+    cash_buffer_pct: float = 0.0
+    min_trade_notional: float = 1.0
     risk: RiskLimits = field(default_factory=RiskLimits)
     timezone: str = "America/Los_Angeles"
     db_path: str = "data/trader.db"
@@ -62,6 +65,12 @@ class Config:
     @property
     def kill_switch_path(self) -> Path:
         return Path(self.risk.kill_switch_file)
+
+
+def _optional_float(value: Any) -> float | None:
+    if value in (None, "", "null"):
+        return None
+    return float(value)
 
 
 def _require_weights(raw: Any) -> dict[str, float]:
@@ -99,11 +108,14 @@ def load_config(path: str | Path | None = None) -> Config:
             signal_ticker=str(tf_raw.get("signal_ticker", "VTI")).upper(),
             risk_off_ticker=str(tf_raw.get("risk_off_ticker", "BND")).upper(),
         ),
-        cash_buffer_pct=float(raw.get("cash_buffer_pct", 0.01)),
-        min_trade_notional=float(raw.get("min_trade_notional", 50.0)),
+        capital_cap_usd=_optional_float(raw.get("capital_cap_usd", 100.0)),
+        cash_buffer_usd=float(raw.get("cash_buffer_usd", 1.0)),
+        cash_buffer_pct=float(raw.get("cash_buffer_pct", 0.0)),
+        min_trade_notional=float(raw.get("min_trade_notional", 1.0)),
         risk=RiskLimits(
-            max_order_notional=float(risk_raw.get("max_order_notional", 200_000.0)),
+            max_order_notional_pct=float(risk_raw.get("max_order_notional_pct", 1.0)),
             max_daily_turnover_pct=float(risk_raw.get("max_daily_turnover_pct", 2.0)),
+            max_order_notional=_optional_float(risk_raw.get("max_order_notional")),
             kill_switch_file=str(risk_raw.get("kill_switch_file", ".killswitch")),
         ),
         timezone=str(raw.get("timezone", "America/Los_Angeles")),

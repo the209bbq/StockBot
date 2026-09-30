@@ -45,6 +45,44 @@ class OrderIntent:
         }
 
 
+def bot_positions_only(positions: dict[str, Position], symbols: list[str]) -> dict[str, Position]:
+    return {s: positions[s] for s in symbols if s in positions}
+
+
+def cash_buffer_dollars(cfg: Config, equity: float) -> float:
+    if cfg.cash_buffer_usd and cfg.cash_buffer_usd > 0:
+        return min(float(cfg.cash_buffer_usd), max(0.0, equity))
+    return max(0.0, equity * float(cfg.cash_buffer_pct))
+
+
+def managed_capital(
+    *,
+    positions: dict[str, Position],
+    account_cash: float,
+    symbols: list[str],
+    capital_cap_usd: float | None,
+) -> tuple[float, float, float]:
+    """Return (managed_equity, bot_cash, bot_market_value).
+
+    Only VTI/VXUS/BND (the configured symbols) count. Surplus paper-account
+    cash is ignored. On a flat sleeve we take up to `capital_cap_usd` from
+    account cash so a $100k paper account still starts as a $100 bot.
+    Once lots exist we never siphon more unmanaged cash; the sleeve can grow.
+    """
+    bot = bot_positions_only(positions, symbols)
+    bot_mv = sum(p.market_value for p in bot.values())
+    cash = max(0.0, float(account_cash))
+    if capital_cap_usd is None:
+        return bot_mv + cash, cash, bot_mv
+    cap = float(capital_cap_usd)
+    if bot_mv <= 1e-8:
+        bot_cash = min(cap, cash)
+        return bot_cash, bot_cash, 0.0
+    unused_cap = max(0.0, cap - bot_mv)
+    bot_cash = min(cash, unused_cap)
+    return bot_mv + bot_cash, bot_cash, bot_mv
+
+
 def portfolio_weights(
     positions: dict[str, Position],
     cash: float,
@@ -69,15 +107,16 @@ def plan_orders(
 ) -> list[OrderIntent]:
     """Diff current holdings against target weights.
 
-    Invests `equity * (1 - cash_buffer_pct)`. Legs smaller than
-    `min_trade_notional` are dropped so tiny drifts do not trade.
+    Invests `equity - cash_buffer`. Legs smaller than
+    `min_trade_notional` ($1 Alpaca fractional floor) are dropped.
     Extra symbols (not in the target mix) are sold if large enough.
     Sells are listed before buys so a later submit pass can free cash first.
+    Orders are notional (fractional).
     """
     if equity <= 0:
         return []
 
-    investable = equity * (1.0 - cfg.cash_buffer_pct)
+    investable = max(0.0, equity - cash_buffer_dollars(cfg, equity))
     desired = {s: w * investable for s, w in target_weights.items()}
 
     current_value = {s: positions[s].market_value for s in positions}

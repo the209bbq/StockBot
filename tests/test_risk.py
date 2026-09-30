@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import pytest
 
+from dataclasses import replace
+
 from rebalance import OrderIntent
-from risk import RiskError, check_orders, kill_switch_active
+from risk import RiskError, check_orders, kill_switch_active, scaled_order_cap
 
 
 def _buy(symbol="VTI", notional=1_000.0) -> OrderIntent:
@@ -65,5 +67,27 @@ def test_max_daily_turnover_includes_prior_fills():
         equity=100_000,
         max_order_notional=200_000,
         max_daily_turnover_pct=2.0,
+        env={},
+    )
+
+
+def test_risk_caps_scale_with_managed_capital(cfg):
+    assert scaled_order_cap(100.0, cfg) == 100.0
+    tight = replace(cfg, risk=replace(cfg.risk, max_order_notional_pct=0.4))
+    assert scaled_order_cap(100.0, tight) == 40.0
+    with pytest.raises(RiskError, match="max_order_notional"):
+        check_orders(
+            [_buy("VTI", 54.45)],
+            equity=100.0,
+            max_order_notional=scaled_order_cap(100.0, tight),
+            max_daily_turnover_pct=2.0,
+            env={},
+        )
+    # Default 100% of $100 sleeve allows the initial VTI buy.
+    check_orders(
+        [_buy("VTI", 54.45), _buy("VXUS", 24.75), _buy("BND", 19.80)],
+        equity=100.0,
+        max_order_notional=scaled_order_cap(100.0, cfg),
+        max_daily_turnover_pct=cfg.risk.max_daily_turnover_pct,
         env={},
     )

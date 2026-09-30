@@ -19,3 +19,14 @@ def test_weekly_summary_vs_benchmark(tmp_path):
     assert "Buy & hold mix:" in text
     assert "Last week" in text
     assert "+2.00%" in text
+
+
+def test_benchmark_starts_at_one_hundred(tmp_path):
+    store = Store(tmp_path / "t.db")
+    prices = {"VTI": 100.0, "VXUS": 50.0, "BND": 80.0}
+    mix = {"VTI": 0.55, "VXUS": 0.25, "BND": 0.20}
+    store.snapshot_equity("2026-09-30", 100.0, 1.0, {})
+    store.init_benchmark_if_needed("2026-09-30", 100.0, prices, mix)
+    assert store.get_state("benchmark_start_equity") == "100.0"
+    hist = store.benchmark_history()
+    assert hist[0].equity == 100.0

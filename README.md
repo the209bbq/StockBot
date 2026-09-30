@@ -16,8 +16,9 @@ Configured in [`config.yaml`](config.yaml):
 | Calendar | Month-end check |
 | Bands | If any fund is more than **5 percentage points** from target, rebalance the whole book back to target |
 | Trend filter | **On**. If VTI closes below its 200-day SMA at the monthly check, hold 100% BND until a later monthly check closes above the SMA |
-| Cash buffer | 1% uninvested |
-| Min trade | $50 notional — tiny drifts do not trade |
+| Capital cap | **$100** managed sleeve. The paper account may hold $100k; surplus cash is ignored. Only VTI/VXUS/BND lots count. |
+| Cash buffer | **$1** uninvested |
+| Min trade | **$1** notional (Alpaca fractional floor) |
 
 Turn the trend filter off with a single flag:
 
@@ -31,7 +32,7 @@ trend_filter:
 - **Paper only.** `broker_alpaca.assert_paper_only()` rejects every non-paper base URL before an SDK client is built. `paper=True` and the paper URL are forced.
 - **Secrets from the environment only.** `APCA_API_KEY_ID`, `APCA_API_SECRET_KEY`. Never commit a `.env`.
 - **Reconcile** against broker positions before ordering. The broker is source of truth.
-- **Risk gates** in `risk.py`: max order notional, max daily turnover (buy+sell), kill switch via `.killswitch` or `KILL_SWITCH=1`.
+- **Risk gates** in `risk.py`: max order size and max daily turnover are fractions of **managed** (capped) equity, plus a file/env kill switch (`.killswitch` or `KILL_SWITCH=1`).
 - **Idempotent** `client_order_id` values so a retry of the same day/symbol/side/size does not double-send.
 - **Retries with backoff** on 429 / 5xx.
 - **Default `--dry-run`**: print the plan, persist it as `dry_run` rows, submit nothing.

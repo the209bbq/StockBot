@@ -104,6 +104,31 @@ def test_is_month_end_calendar():
     assert not is_month_end(date(2026, 9, 29), trading)
 
 
+def test_run_caps_empty_paper_account_to_100(cfg, store):
+    broker = MockBroker(
+        cash=100_000.0,
+        equity=100_000.0,
+        positions={},
+        prices={"VTI": 375.26, "VXUS": 85.49, "BND": 70.23},
+    )
+    result = run_rebalance(cfg, broker, store, NullNotifier(), dry_run=True, force=True, env={})
+    assert result["auth"] == "ok"
+    assert result["account"]["equity"] == 100_000.0
+    assert result["managed"]["equity"] == 100.0
+    assert result["managed"]["cash"] == 100.0
+    assert result["action"] == "dry_run"
+    assert result["orders_submitted"] is False
+    invested = sum(o["notional"] for o in result["orders"])
+    assert abs(invested - 99.0) < 0.05
+    by_sym = {o["symbol"]: o for o in result["orders"]}
+    assert by_sym["VTI"]["side"] == "buy" and by_sym["VTI"]["notional"] == 54.45
+    assert by_sym["VXUS"]["notional"] == 24.75
+    assert by_sym["BND"]["notional"] == 19.80
+    assert store.equity_history()[0].equity == 100.0
+    assert store.get_state("benchmark_start_equity") == "100.0"
+    assert broker.submitted == []
+
+
 def test_within_band_no_orders(cfg, store, on_target_positions):
     broker = MockBroker(
         cash=1_000.0,
