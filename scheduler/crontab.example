@@ -1,0 +1,14 @@
+# Example crontab for the paper ETF rebalancer.
+# Month-end check after the US cash session (1:30pm America/Los_Angeles ≈ 4:30pm ET).
+# The bot itself no-ops on non-month-end days unless you pass --force.
+#
+# Install: crontab -e  (edit paths / user first)
+# Dry-run is the default. Switch to `--paper --submit` only after you have
+# watched several dry-run cycles against your paper account.
+
+SHELL=/bin/bash
+PATH=/usr/bin:/bin:/usr/local/bin
+CRON_TZ=America/Los_Angeles
+
+30 13 28-31 * * cd /home/YOU/StockBot && test -f .venv/bin/activate && . .venv/bin/activate; python run.py --dry-run --paper >> data/cron.log 2>&1
+# 30 13 28-31 * * cd /home/YOU/StockBot && . .venv/bin/activate && python run.py --paper --submit >> data/cron.log 2>&1

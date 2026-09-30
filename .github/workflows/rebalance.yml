@@ -1,0 +1,58 @@
+# Scheduled paper rebalance. Disabled by default — manual trigger only.
+# Uncomment the `schedule` block if you later want Actions to run it, and
+# store APCA_API_KEY_ID / APCA_API_SECRET_KEY as repository secrets.
+#
+# This workflow never targets the live Alpaca endpoint.
+
+name: paper-rebalance
+
+on:
+  workflow_dispatch:
+    inputs:
+      submit:
+        description: "Submit paper orders (false = dry-run)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+  # schedule:
+  #   - cron: "30 20 28-31 * *"   # ~1:30pm PT; bot skips non-month-end days
+
+jobs:
+  rebalance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -r requirements.txt
+      - name: Guard paper-only base URL
+        env:
+          APCA_API_BASE_URL: ${{ secrets.APCA_API_BASE_URL || 'https://paper-api.alpaca.markets' }}
+        run: |
+          if [ "$APCA_API_BASE_URL" != "https://paper-api.alpaca.markets" ]; then
+            echo "Refusing to run: live trading needs explicit owner approval."
+            exit 2
+          fi
+      - name: Dry-run (default)
+        if: ${{ github.event.inputs.submit != 'true' }}
+        env:
+          APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+          APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+          APCA_API_BASE_URL: https://paper-api.alpaca.markets
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python run.py --paper --dry-run
+      - name: Submit paper orders
+        if: ${{ github.event.inputs.submit == 'true' }}
+        env:
+          APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+          APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+          APCA_API_BASE_URL: https://paper-api.alpaca.markets
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python run.py --paper --submit
