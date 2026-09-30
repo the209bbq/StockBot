@@ -68,6 +68,29 @@ def _sma(closes, window: int) -> float | None:
     return float(closes.tail(window).mean())
 
 
+def _yfinance_closes(symbol: str, limit: int = 250):
+    """Offline-friendly fallback when the Alpaca data client has no bars."""
+    import pandas as pd
+    import yfinance as yf
+
+    df = yf.download(symbol, period="2y", auto_adjust=True, progress=False)
+    if df is None or df.empty:
+        return pd.Series(dtype=float, name=symbol)
+    s = df["Close"]
+    if isinstance(s, pd.DataFrame):
+        s = s.iloc[:, 0]
+    s = s.dropna()
+    s.name = symbol
+    return s.tail(limit)
+
+
+def _print_status(payload: dict[str, Any]) -> None:
+    """Structured report. Never include env or secret fields."""
+    banned = {"APCA_API_KEY_ID", "APCA_API_SECRET_KEY", "api_key", "secret_key", "secret"}
+    clean = {k: v for k, v in payload.items() if k not in banned}
+    print(json.dumps(clean, indent=2, default=str))
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Paper-only ETF rebalancer (dry-run by default).")
     p.add_argument("--config", default="config.yaml", help="Path to config.yaml")
@@ -127,11 +150,37 @@ def run_rebalance(
         notifier.notify("kill_switch", msg)
         result["action"] = "blocked_kill_switch"
         result["error"] = msg
-        print(msg)
+        result["orders_submitted"] = False
+        _print_status(result)
         return result
 
-    account = broker.get_account()
-    positions = broker.get_positions()
+    try:
+        account = broker.get_account()
+        positions = broker.get_positions()
+    except Exception as exc:
+        result["auth"] = "failed"
+        result["base_url"] = PAPER_BASE_URL
+        result["error_type"] = type(exc).__name__
+        result["error"] = str(exc)
+        result["orders_submitted"] = False
+        _print_status(result)
+        raise
+    result["auth"] = "ok"
+    result["base_url"] = PAPER_BASE_URL
+    result["account"] = {
+        "status": account.status,
+        "equity": round(account.equity, 2),
+        "cash": round(account.cash, 2),
+        "buying_power": round(account.buying_power, 2),
+    }
+    result["positions"] = {
+        s: {
+            "qty": p.qty,
+            "market_value": round(p.market_value, 2),
+            "price": p.current_price,
+        }
+        for s, p in positions.items()
+    }
     stored = store.last_positions()
     mismatches = reconcile(positions, stored) if stored else []
     if mismatches:
@@ -146,20 +195,52 @@ def run_rebalance(
     weights = portfolio_weights(positions, account.cash, account.equity)
     signal_close = prices.get(cfg.trend_filter.signal_ticker)
     sma = None
+    sma_source = None
     if cfg.trend_filter.enabled:
         closes = broker.get_daily_closes(cfg.trend_filter.signal_ticker, limit=cfg.trend_filter.sma_days + 20)
+        sma_source = "broker"
+        if closes is None or len(closes) < cfg.trend_filter.sma_days:
+            closes = _yfinance_closes(cfg.trend_filter.signal_ticker, cfg.trend_filter.sma_days + 20)
+            sma_source = "yfinance"
         sma = _sma(closes, cfg.trend_filter.sma_days)
         if closes is not None and not closes.empty:
             signal_close = float(closes.iloc[-1])
+        result["sma_source"] = sma_source
 
     risk_on = store.get_risk_on(default=True)
-    decision = decide(
-        current_weights=weights,
-        cfg=cfg,
-        risk_on=risk_on,
-        signal_close=signal_close if cfg.trend_filter.enabled else None,
-        sma=sma if cfg.trend_filter.enabled else None,
-    )
+    try:
+        decision = decide(
+            current_weights=weights,
+            cfg=cfg,
+            risk_on=risk_on,
+            signal_close=signal_close if cfg.trend_filter.enabled else None,
+            sma=sma if cfg.trend_filter.enabled else None,
+        )
+    except ValueError as exc:
+        result["error"] = str(exc)
+        result["orders_submitted"] = False
+        result["trend"] = {
+            "enabled": cfg.trend_filter.enabled,
+            "signal": cfg.trend_filter.signal_ticker,
+            "close": signal_close,
+            "sma_200": sma,
+            "source": sma_source,
+        }
+        _print_status(result)
+        raise
+    result["trend"] = {
+        "enabled": cfg.trend_filter.enabled,
+        "signal": cfg.trend_filter.signal_ticker,
+        "close": decision.signal_close,
+        "sma_200": decision.sma,
+        "vs_sma": (
+            None
+            if decision.signal_close is None or decision.sma is None
+            else ("below" if decision.signal_close < decision.sma else "above_or_equal")
+        ),
+        "risk_on": decision.risk_on,
+        "source": sma_source,
+    }
     result["decision"] = {
         "reason": decision.reason,
         "risk_on": decision.risk_on,
@@ -186,13 +267,15 @@ def run_rebalance(
     month_end = is_month_end(check_date)
     if not force and not month_end and not dry_run:
         result["action"] = "skipped_not_month_end"
-        print(f"{day} is not month-end; skipping (pass --force to override).")
+        result["orders_submitted"] = False
+        _print_status(result)
         return result
 
     if not decision.should_rebalance:
         result["action"] = "within_band"
-        print(f"No trade: {decision.reason} (max drift {decision.max_drift_pp:.2f} pp).")
+        result["orders_submitted"] = False
         store.set_risk_on(decision.risk_on)
+        _print_status(result)
         return result
 
     orders = plan_orders(
@@ -220,10 +303,9 @@ def run_rebalance(
         notifier.notify("risk", str(exc), {"orders": result["orders"]})
         result["action"] = "blocked_risk"
         result["error"] = str(exc)
-        print(f"Risk block: {exc}")
+        result["orders_submitted"] = False
+        _print_status(result)
         return result
-
-    print(json.dumps({"decision": result["decision"], "orders": result["orders"]}, indent=2, default=str))
 
     if dry_run:
         for intent in orders:
@@ -239,7 +321,9 @@ def run_rebalance(
                 raw=intent.as_dict(),
             )
         result["action"] = "dry_run"
+        result["orders_submitted"] = False
         store.set_risk_on(decision.risk_on)
+        _print_status(result)
         return result
 
     submitted = []
@@ -286,7 +370,9 @@ def run_rebalance(
         submitted.append(rec)
     result["submitted"] = submitted
     result["action"] = "submitted"
+    result["orders_submitted"] = True
     store.set_risk_on(decision.risk_on)
+    _print_status(result)
     return result
 
 
@@ -321,7 +407,22 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
 
     try:
         if args.paper:
-            broker: Any = AlpacaBroker.from_env(environ)
+            print("PAPER DRY-RUN" if args.dry_run else "PAPER SUBMIT")
+            print(f"base_url={PAPER_BASE_URL}")
+            print("orders_will_be_sent=false" if args.dry_run else "orders_will_be_sent=true")
+            try:
+                broker: Any = AlpacaBroker.from_env(environ)
+            except Exception as exc:
+                _print_status(
+                    {
+                        "auth": "failed",
+                        "base_url": PAPER_BASE_URL,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                        "orders_submitted": False,
+                    }
+                )
+                raise
         else:
             broker = MockBroker()
             print("Using in-memory mock broker (no API keys required).")

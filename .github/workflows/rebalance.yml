@@ -1,28 +1,22 @@
-# Scheduled paper rebalance. Disabled by default — manual trigger only.
-# Uncomment the `schedule` block if you later want Actions to run it, and
-# store APCA_API_KEY_ID / APCA_API_SECRET_KEY as repository secrets.
-#
-# This workflow never targets the live Alpaca endpoint.
+# Paper-account dry-run only. Schedule stays disabled.
+# workflow_dispatch is available because this file already exists on main
+# (PR #1 was merged). This revision removes the submit path entirely.
 
 name: paper-rebalance
 
 on:
   workflow_dispatch:
-    inputs:
-      submit:
-        description: "Submit paper orders (false = dry-run)"
-        required: false
-        default: "false"
-        type: choice
-        options:
-          - "false"
-          - "true"
+  # Execute on this PR branch when pushed, so we do not need to merge
+  # and do not need to click Run workflow. Remove after the dry-run.
+  push:
+    branches:
+      - cursor/paper-dry-run-actions-5ef3
 
   # schedule:
-  #   - cron: "30 20 28-31 * *"   # ~1:30pm PT; bot skips non-month-end days
+  #   - cron: "30 20 28-31 * *"   # kept disabled
 
 jobs:
-  rebalance:
+  paper-dry-run:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -32,27 +26,26 @@ jobs:
           python-version: "3.12"
       - name: Install
         run: pip install -r requirements.txt
-      - name: Guard paper-only base URL
+      - name: Confirm paper keys exist (do not print values)
         env:
-          APCA_API_BASE_URL: ${{ secrets.APCA_API_BASE_URL || 'https://paper-api.alpaca.markets' }}
+          APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+          APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
         run: |
-          if [ "$APCA_API_BASE_URL" != "https://paper-api.alpaca.markets" ]; then
-            echo "Refusing to run: live trading needs explicit owner approval."
-            exit 2
+          set +x
+          if [ -z "${APCA_API_KEY_ID}" ] || [ -z "${APCA_API_SECRET_KEY}" ]; then
+            echo "Missing APCA_API_KEY_ID or APCA_API_SECRET_KEY repository secret."
+            exit 1
           fi
-      - name: Dry-run (default)
-        if: ${{ github.event.inputs.submit != 'true' }}
+          echo "Paper API keys are present (values not printed)."
+          echo "Key id length: ${#APCA_API_KEY_ID}"
+          echo "Secret length: ${#APCA_API_SECRET_KEY}"
+      - name: Paper dry-run (no submit)
         env:
           APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
           APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
           APCA_API_BASE_URL: https://paper-api.alpaca.markets
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: python run.py --paper --dry-run
-      - name: Submit paper orders
-        if: ${{ github.event.inputs.submit == 'true' }}
-        env:
-          APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
-          APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
-          APCA_API_BASE_URL: https://paper-api.alpaca.markets
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: python run.py --paper --submit
+        run: |
+          set +x
+          echo "Base URL=$APCA_API_BASE_URL"
+          echo "Command: python run.py --paper --dry-run --force"
+          python run.py --paper --dry-run --force
