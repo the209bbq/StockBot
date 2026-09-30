@@ -62,6 +62,18 @@ CREATE TABLE IF NOT EXISTS strategy_state (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS closed_trades (
+    id INTEGER PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    entry_date TEXT NOT NULL,
+    exit_date TEXT NOT NULL,
+    entry_price REAL NOT NULL,
+    exit_price REAL NOT NULL,
+    qty REAL NOT NULL,
+    pnl REAL NOT NULL,
+    reason TEXT
+);
 """
 
 
@@ -290,6 +302,94 @@ class Store:
 
     def inception_date(self) -> str | None:
         return self.get_state("benchmark_start")
+
+    def get_realized_pnl(self) -> float:
+        return float(self.get_state("realized_pnl") or 0.0)
+
+    def set_realized_pnl(self, value: float) -> None:
+        self.set_state("realized_pnl", str(float(value)))
+
+    def add_realized_pnl(self, delta: float, as_of: str) -> float:
+        total = self.get_realized_pnl() + float(delta)
+        self.set_realized_pnl(total)
+        key = f"realized_pnl_{as_of}"
+        day = float(self.get_state(key) or 0.0) + float(delta)
+        self.set_state(key, str(day))
+        return total
+
+    def realized_pnl_on(self, as_of: str) -> float:
+        return float(self.get_state(f"realized_pnl_{as_of}") or 0.0)
+
+    def get_open_position(self):
+        from momentum import OpenPosition
+
+        raw = self.get_state("open_position")
+        if not raw:
+            return None
+        rec = json.loads(raw)
+        return OpenPosition(
+            symbol=str(rec["symbol"]),
+            qty=float(rec["qty"]),
+            entry_date=str(rec["entry_date"]),
+            entry_price=float(rec["entry_price"]),
+            high_close=float(rec["high_close"]),
+        )
+
+    def set_open_position(self, pos) -> None:
+        self.set_state(
+            "open_position",
+            _json(
+                {
+                    "symbol": pos.symbol,
+                    "qty": pos.qty,
+                    "entry_date": pos.entry_date,
+                    "entry_price": pos.entry_price,
+                    "high_close": pos.high_close,
+                }
+            ),
+        )
+
+    def clear_open_position(self) -> None:
+        self._conn.execute("DELETE FROM strategy_state WHERE key = ?", ("open_position",))
+        self._conn.commit()
+
+    def record_closed_trade(
+        self,
+        *,
+        symbol: str,
+        entry_date: str,
+        exit_date: str,
+        entry_price: float,
+        exit_price: float,
+        qty: float,
+        pnl: float,
+        reason: str,
+    ) -> None:
+        self._conn.execute(
+            "INSERT INTO closed_trades(symbol, entry_date, exit_date, entry_price, exit_price, qty, pnl, reason) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (symbol, entry_date, exit_date, entry_price, exit_price, qty, pnl, reason),
+        )
+        self._conn.commit()
+
+    def closed_trades(self) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT symbol, entry_date, exit_date, entry_price, exit_price, qty, pnl, reason "
+            "FROM closed_trades ORDER BY exit_date, id"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def trade_stats(self) -> dict[str, float | int]:
+        trades = self.closed_trades()
+        if not trades:
+            return {"trades": 0, "wins": 0, "win_rate": 0.0, "realized_pnl": self.get_realized_pnl()}
+        wins = sum(1 for t in trades if float(t["pnl"]) > 0)
+        return {
+            "trades": len(trades),
+            "wins": wins,
+            "win_rate": wins / len(trades),
+            "realized_pnl": self.get_realized_pnl(),
+        }
 
 
 def today_iso(as_of: date | datetime | str | None = None) -> str:

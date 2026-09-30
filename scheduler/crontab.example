@@ -1,14 +1,21 @@
-# Example crontab for the paper ETF rebalancer.
-# Month-end check after the US cash session (1:30pm America/Los_Angeles ≈ 4:30pm ET).
-# The bot itself no-ops on non-month-end days unless you pass --force.
+# Near-close QQQ momentum check (paper dry-run by default).
+#
+# Prefer CRON_TZ=America/New_York so a single 15:50 line follows DST.
+# If the host is UTC-only, install BOTH 19:50 and 20:50 UTC lines; the bot
+# converts to Eastern time and no-ops the hour that is not 15:50 ET, plus
+# weekends/holidays/early closes via Alpaca's clock/calendar.
 #
 # Install: crontab -e  (edit paths / user first)
-# Dry-run is the default. Switch to `--paper --submit` only after you have
-# watched several dry-run cycles against your paper account.
+# Switch to `--paper --submit` only after you have watched several dry-run
+# cycles against the paper account. Actions never submits.
 
 SHELL=/bin/bash
 PATH=/usr/bin:/bin:/usr/local/bin
-CRON_TZ=America/Los_Angeles
+CRON_TZ=America/New_York
 
-30 13 28-31 * * cd /home/YOU/StockBot && test -f .venv/bin/activate && . .venv/bin/activate; python run.py --dry-run --paper >> data/cron.log 2>&1
-# 30 13 28-31 * * cd /home/YOU/StockBot && . .venv/bin/activate && python run.py --paper --submit >> data/cron.log 2>&1
+50 15 * * 1-5 cd /home/YOU/StockBot && test -f .venv/bin/activate && . .venv/bin/activate; python run.py --dry-run --paper >> data/cron.log 2>&1
+# 50 15 * * 1-5 cd /home/YOU/StockBot && . .venv/bin/activate && python run.py --paper --submit >> data/cron.log 2>&1
+
+# UTC-only host (uncomment BOTH; leave CRON_TZ unset):
+# 50 19 * * 1-5 cd /home/YOU/StockBot && . .venv/bin/activate && python run.py --dry-run --paper >> data/cron.log 2>&1
+# 50 20 * * 1-5 cd /home/YOU/StockBot && . .venv/bin/activate && python run.py --dry-run --paper >> data/cron.log 2>&1

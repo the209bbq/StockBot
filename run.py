@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Paper-only ETF rebalance entrypoint.
+"""Paper-only trading entrypoint (QQQ momentum default; ETF rebalancer optional).
 
 Default is --dry-run: print the order plan and send nothing.
 `--paper` talks to Alpaca paper (keys required). There is no live path.
@@ -30,6 +30,7 @@ from notifier import Notifier, build_notifier
 from rebalance import Position, plan_orders, portfolio_weights, reconcile
 from risk import RiskError, check_orders, kill_switch_active
 from store import Store, today_iso
+from run_momentum import run_momentum
 from strategy import decide
 
 load_dotenv()
@@ -69,7 +70,7 @@ def _sma(closes, window: int) -> float | None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Paper-only ETF rebalancer (dry-run by default).")
+    p = argparse.ArgumentParser(description="Paper-only trading bot (dry-run by default).")
     p.add_argument("--config", default="config.yaml", help="Path to config.yaml")
     p.add_argument(
         "--dry-run",
@@ -90,7 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--force",
         action="store_true",
-        help="Run the check even when today is not a month-end.",
+        help="Skip calendar / month-end / near-close gates.",
     )
     p.add_argument(
         "--as-of",
@@ -207,10 +208,15 @@ def run_rebalance(
     result["orders"] = [o.as_dict() for o in orders]
 
     try:
+        etf_order_cap = (
+            cfg.risk.max_order_notional
+            if cfg.risk.max_order_notional is not None
+            else account.equity * cfg.risk.max_order_notional_pct
+        )
         check_orders(
             orders,
             equity=account.equity,
-            max_order_notional=cfg.risk.max_order_notional,
+            max_order_notional=etf_order_cap,
             max_daily_turnover_pct=cfg.risk.max_daily_turnover_pct,
             already_traded_today=store.turnover_today(day),
             kill_switch_path=cfg.kill_switch_path,
@@ -322,10 +328,14 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
     try:
         if args.paper:
             broker: Any = AlpacaBroker.from_env(environ)
+        elif cfg.strategy == "qqq_momentum":
+            broker = MockBroker(positions={}, cash=100_000.0, equity=100_000.0)
+            print("Using in-memory mock broker (no API keys required).")
         else:
             broker = MockBroker()
             print("Using in-memory mock broker (no API keys required).")
-        run_rebalance(
+        runner = run_momentum if cfg.strategy == "qqq_momentum" else run_rebalance
+        runner(
             cfg,
             broker,
             store,

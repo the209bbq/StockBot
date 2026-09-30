@@ -1,28 +1,31 @@
-# Scheduled paper rebalance. Disabled by default — manual trigger only.
-# Uncomment the `schedule` block if you later want Actions to run it, and
-# store APCA_API_KEY_ID / APCA_API_SECRET_KEY as repository secrets.
+# Paper-account QQQ momentum dry-run only. Schedule stays disabled.
+# workflow_dispatch exists on main from PR #1; this revision removes the
+# submit path (PR #2 idea) and adds DST-aware commented crons + state persist.
 #
-# This workflow never targets the live Alpaca endpoint.
+# This workflow never targets the live Alpaca endpoint and never submits orders.
 
-name: paper-rebalance
+name: paper-qqq-momentum
 
 on:
   workflow_dispatch:
-    inputs:
-      submit:
-        description: "Submit paper orders (false = dry-run)"
-        required: false
-        default: "false"
-        type: choice
-        options:
-          - "false"
-          - "true"
+  # Execute on this PR branch when pushed, so we do not need to merge
+  # and do not need to click Run workflow. Remove after the dry-run.
+  push:
+    branches:
+      - cursor/qqq-momentum-paper-5ef3
 
+  # Dual UTC hours so 15:50 America/New_York is hit in both DST regimes.
+  # The job still asks Alpaca's clock/calendar and skips the wrong hour,
+  # weekends, holidays, and early closes (close before 15:30 ET).
   # schedule:
-  #   - cron: "30 20 28-31 * *"   # ~1:30pm PT; bot skips non-month-end days
+  #   - cron: "50 19 * * 1-5"   # 15:50 ET during EDT (UTC-4)
+  #   - cron: "50 20 * * 1-5"   # 15:50 ET during EST (UTC-5)
+
+permissions:
+  contents: write
 
 jobs:
-  rebalance:
+  paper-dry-run:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -32,27 +35,84 @@ jobs:
           python-version: "3.12"
       - name: Install
         run: pip install -r requirements.txt
-      - name: Guard paper-only base URL
-        env:
-          APCA_API_BASE_URL: ${{ secrets.APCA_API_BASE_URL || 'https://paper-api.alpaca.markets' }}
+      - name: Restore SQLite (cache, fast path)
+        uses: actions/cache@v4
+        with:
+          path: data/trader.db
+          key: trader-db-${{ github.run_id }}
+          restore-keys: |
+            trader-db-
+      - name: Restore SQLite (bot-state branch, source of truth)
+        continue-on-error: true
         run: |
-          if [ "$APCA_API_BASE_URL" != "https://paper-api.alpaca.markets" ]; then
-            echo "Refusing to run: live trading needs explicit owner approval."
-            exit 2
+          set +x
+          mkdir -p data
+          git fetch origin bot-state --depth=1
+          if git cat-file -e origin/bot-state:data/trader.db 2>/dev/null; then
+            git show origin/bot-state:data/trader.db > data/trader.db
+            echo "Restored data/trader.db from origin/bot-state"
+          else
+            echo "No data/trader.db on origin/bot-state yet (first run is fine)"
           fi
-      - name: Dry-run (default)
-        if: ${{ github.event.inputs.submit != 'true' }}
+      - name: Confirm paper keys exist (do not print values)
+        env:
+          APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+          APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+        run: |
+          set +x
+          if [ -z "${APCA_API_KEY_ID}" ] || [ -z "${APCA_API_SECRET_KEY}" ]; then
+            echo "Missing APCA_API_KEY_ID or APCA_API_SECRET_KEY repository secret."
+            exit 1
+          fi
+          echo "Paper API keys are present (values not printed)."
+          echo "Key id length: ${#APCA_API_KEY_ID}"
+          echo "Secret length: ${#APCA_API_SECRET_KEY}"
+      - name: Paper dry-run (no submit)
         env:
           APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
           APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
           APCA_API_BASE_URL: https://paper-api.alpaca.markets
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: python run.py --paper --dry-run
-      - name: Submit paper orders
-        if: ${{ github.event.inputs.submit == 'true' }}
+        run: |
+          set +x
+          echo "Base URL=$APCA_API_BASE_URL"
+          echo "Command: python run.py --paper --dry-run --force"
+          python run.py --paper --dry-run --force
+      - name: Persist SQLite to bot-state branch
+        if: success()
         env:
-          APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
-          APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
-          APCA_API_BASE_URL: https://paper-api.alpaca.markets
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: python run.py --paper --submit
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +x
+          if [ ! -f data/trader.db ]; then
+            echo "No data/trader.db to persist"
+            exit 0
+          fi
+          STATE_DIR="${RUNNER_TEMP}/bot-state"
+          REPO_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git ls-remote --exit-code --heads origin bot-state >/dev/null 2>&1; then
+            git clone --depth=1 --branch bot-state "$REPO_URL" "$STATE_DIR"
+          else
+            git clone --depth=1 "$REPO_URL" "$STATE_DIR"
+            git -C "$STATE_DIR" checkout --orphan bot-state
+            git -C "$STATE_DIR" rm -rf . >/dev/null 2>&1 || true
+          fi
+          mkdir -p "$STATE_DIR/data"
+          cp data/trader.db "$STATE_DIR/data/trader.db"
+          git -C "$STATE_DIR" config user.name "stockbot-state"
+          git -C "$STATE_DIR" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$STATE_DIR" add data/trader.db
+          if git -C "$STATE_DIR" diff --cached --quiet; then
+            echo "bot-state: no SQLite change"
+            exit 0
+          fi
+          git -C "$STATE_DIR" commit -m "persist trader.db ${GITHUB_SHA:0:7} ${GITHUB_RUN_ID}"
+          git -C "$STATE_DIR" push origin bot-state
+          echo "Persisted data/trader.db to origin/bot-state"
+      - name: Upload SQLite artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trader-db
+          path: data/trader.db
+          if-no-files-found: warn
+          retention-days: 30

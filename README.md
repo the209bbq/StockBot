@@ -1,40 +1,46 @@
 # StockBot
 
-Personal, low-turnover, rules-based ETF rebalancer for **Alpaca paper trading only**.
+Personal, paper-only trading bot. The **live (paper) default** is a short-term **QQQ momentum** rule with a **$100 capital cap**. The original VTI/VXUS/BND month-end rebalancer is still in the repo and selectable.
 
 There is no live-trading path. The process refuses to start unless the API base URL is `https://paper-api.alpaca.markets`. Any live URL or `--live` flag exits with: *Live trading needs explicit owner approval.*
 
-This automates discipline (bands, a slow trend filter, risk caps), not alpha. See the research notes that scoped the project: a 55/25/20 VTI/VXUS/BND mix, month-end 5 percentage-point bands, and an optional 200-day SMA filter into 100% BND.
+## Default strategy: QQQ momentum
 
-## Strategy
-
-Configured in [`config.yaml`](config.yaml):
+Configured in [`config.yaml`](config.yaml) (`strategy: qqq_momentum`):
 
 | Rule | Default |
 |---|---|
-| Target mix | VTI 55% / VXUS 25% / BND 20% |
-| Calendar | Month-end check |
-| Bands | If any fund is more than **5 percentage points** from target, rebalance the whole book back to target |
-| Trend filter | **On**. If VTI closes below its 200-day SMA at the monthly check, hold 100% BND until a later monthly check closes above the SMA |
-| Cash buffer | 1% uninvested |
-| Min trade | $50 notional — tiny drifts do not trade |
+| Universe | QQQ only |
+| When | Once per regular trading day, near the close (~3:50 PM America/New_York) |
+| Entry | If flat and today's close (last print as proxy) **> highest close of the prior 20 trading days**, buy QQQ |
+| Size | `capital_cap_usd + realized sleeve P&L` (starts at **$100**; **gains compound**; the paper account's leftover ~$99,900 is ignored) |
+| Exit | Sell all if the close is **5% or more below the highest close since entry**, or after **20 trading days** held |
+| Orders | Fractional notional (buy) / qty (sell), market, **$1 minimum** |
+| Data | Alpaca daily bars when the paper key can fetch them; otherwise yfinance. The run log records `price_source` |
 
-Turn the trend filter off with a single flag:
+The scheduler should fire at **both** 19:50 UTC (EDT) and 20:50 UTC (EST). The bot converts to Eastern time, asks Alpaca's clock/calendar, and skips weekends, holidays, early closes (session close before 15:30 ET), and the DST hour that is not 15:50 ET.
+
+## Capital cap
 
 ```yaml
-trend_filter:
-  enabled: false
+capital_cap_usd: 100.0
+# Tradable cash = cap + realized P&L of this bot (gains compound).
 ```
+
+Risk checks never put more than that tradable amount in the market. Max daily sleeve loss and the kill switch (`.killswitch` or `KILL_SWITCH=1`) still apply.
+
+## Optional strategy: ETF rebalancer
+
+Set `strategy: etf_rebalance` to use the original month-end 55/25/20 VTI/VXUS/BND book with 5pp bands and the optional 200-day VTI SMA → 100% BND filter. That code path is unchanged; it is just no longer the default.
 
 ## Safety
 
 - **Paper only.** `broker_alpaca.assert_paper_only()` rejects every non-paper base URL before an SDK client is built. `paper=True` and the paper URL are forced.
 - **Secrets from the environment only.** `APCA_API_KEY_ID`, `APCA_API_SECRET_KEY`. Never commit a `.env`.
-- **Reconcile** against broker positions before ordering. The broker is source of truth.
-- **Risk gates** in `risk.py`: max order notional, max daily turnover (buy+sell), kill switch via `.killswitch` or `KILL_SWITCH=1`.
+- **Risk gates** in `risk.py`: kill switch, $1 min, never more than cap+sleeve P&L, max daily sleeve loss.
 - **Idempotent** `client_order_id` values so a retry of the same day/symbol/side/size does not double-send.
 - **Retries with backoff** on 429 / 5xx.
-- **Default `--dry-run`**: print the plan, persist it as `dry_run` rows, submit nothing.
+- **Default `--dry-run`**: print the plan, persist it as `dry_run` rows, **submit nothing**. A dry-run does **not** open or close the stored live position.
 
 ## Setup
 
@@ -49,8 +55,8 @@ cp .env.example .env
 
 ### Alpaca paper account
 
-1. Create an account at [Alpaca](https://alpaca.markets) and open the **Paper Trading** dashboard ([docs](https://docs.alpaca.markets/us/docs/paper-trading)).
-2. Generate paper API keys (the paper account starts with $100k of buying power).
+1. Create an account at [Alpaca](https://alpaca.markets) and open the **Paper Trading** dashboard.
+2. Generate paper API keys (the paper account starts with $100k of buying power; this bot only uses $100 plus its own P&L).
 3. Put only the paper keys in `.env`:
 
 ```
@@ -59,17 +65,13 @@ APCA_API_SECRET_KEY=...
 APCA_API_BASE_URL=https://paper-api.alpaca.markets
 ```
 
-Paper and live use the same API shape with different keys and hostnames. This repo will not talk to `https://api.alpaca.markets`.
-
 ## Dry-run (no keys)
 
-Works offline against an in-memory mock broker with a deliberately drifted 70/15/15 book:
+Works offline against an in-memory mock broker:
 
 ```bash
 python run.py --dry-run
 ```
-
-You should see planned sell/buy notionals and **no** broker calls.
 
 Paper dry-run (keys required, still sends nothing):
 
@@ -77,60 +79,56 @@ Paper dry-run (keys required, still sends nothing):
 python run.py --paper --dry-run
 ```
 
-Submit to the paper account (still blocked if the kill switch is on or the URL is not paper):
+Submit to the paper account is still blocked unless you pass `--paper --submit`, the kill switch is off, and the URL is the paper host. The GitHub Actions workflow **never** submits.
 
-```bash
-python run.py --paper --submit
-```
-
-`--force` runs the check on a non-month-end day. Dry-run implies `--force` so a local demo always prints a plan.
+`--force` skips the near-close / calendar gates (and the ETF month-end gate). Dry-run implies `--force` so a local demo always prints a plan.
 
 ## Backtest
 
-The engine in `backtest.py` is the research backtester (buy-and-hold vs 5pp bands vs bands + SMA200, 5 bps slippage, T+1 execution). Cached adjusted closes live under `tests/fixtures/data_cache/` so pytest stays offline.
-
 ```bash
-python backtest.py --universe etf --offline --cache-dir tests/fixtures/data_cache --out-dir /tmp/bt
+python backtest_momentum.py --offline --cache-dir tests/fixtures/data_cache
 ```
 
-ETF rows should match `tests/fixtures/expected_results.csv` within rounding (the attached research run: 2011-01-28 through 2026-09-28).
+This is the round-one “tuned” rule: 20-day high, 5% trail, 20-day max hold, QQQ from 2005-01-03 through 2026-09-30, 2.5 bps per side, $100 start. Research ballpark was ~8.9% CAGR / $100 → ~$639. The command prints **this engine’s actual number**.
 
-Refresh prices (needs network):
-
-```bash
-python backtest.py --universe etf --refresh
-```
+The original ETF research engine is still `python backtest.py --universe etf --offline`.
 
 ## Weekly report
 
-`run.py` snapshots portfolio equity and a buy-and-hold of the **same mix**, started the same day, into SQLite (`data/trader.db` by default).
+`run.py` snapshots the **bot sleeve** and a virtual **$100 QQQ buy-and-hold** started on the bot’s first run day into SQLite (`data/trader.db`).
 
 ```bash
 python report.py
 ```
 
-Prints since-inception and last-week return versus that benchmark.
+Prints weekly and since-inception bot vs hold, plus closed-trade count, wins, and win rate.
+
+## State persistence (GitHub Actions)
+
+Runners are ephemeral, so `data/trader.db` is restored and saved every paper job:
+
+1. **`bot-state` git branch** (source of truth). The workflow checks out `origin/bot-state:data/trader.db` before the run and force-pushes the updated file after a successful dry-run. This survives cache eviction and is the most robust option.
+2. **Actions cache** (`trader-db-*`) as a fast path if the branch is missing.
+3. **Artifact** `trader-db` retained 30 days as a backup.
+
+Dry-runs write snapshots, signals, and `dry_run` order rows. They do **not** invent a live open position, so a later `--submit` will not think it already bought.
+
+Locally, `data/*.db` stays gitignored on feature branches.
 
 ## Kill switch and alerts
 
 ```bash
-# either
 echo 1 > .killswitch
 # or
 export KILL_SWITCH=1
 ```
 
-Both block every order. Optional alerts (no-op if unset):
-
-- `DISCORD_WEBHOOK_URL` — fills, errors, kill switch, drift past the band
-- `NOTIFY_EMAIL_TO` + `SMTP_HOST` (+ `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM`)
+Optional alerts (no-op if unset): `DISCORD_WEBHOOK_URL`, or `NOTIFY_EMAIL_TO` + SMTP vars (see `.env.example`).
 
 ## Scheduler
 
-This strategy does not need an always-on server.
-
-- Cron line: [`scheduler/crontab.example`](scheduler/crontab.example)
-- GitHub Actions: [`.github/workflows/rebalance.yml`](.github/workflows/rebalance.yml) — **manual `workflow_dispatch` only**. The cron schedule is commented out. Do not enable it until paper keys are stored as Actions secrets.
+- Cron: [`scheduler/crontab.example`](scheduler/crontab.example) — dual UTC hours or `CRON_TZ=America/New_York`.
+- GitHub Actions: [`.github/workflows/rebalance.yml`](.github/workflows/rebalance.yml) — **`workflow_dispatch` + this-branch `push` only**. The dual-UTC `schedule:` block is commented out. There is **no submit input**.
 
 ## Tests
 
@@ -140,26 +138,20 @@ Offline, mocked broker, no API keys:
 pytest
 ```
 
-Coverage includes order diffing, 5pp band logic, the 200-day filter, the paper-only guard, the kill switch, dry-run, and the ETF backtest vs the attached results.
+Coverage includes the QQQ entry signal, trailing stop, time exit, cap sizing, paper-only guard, kill switch, dry-run (no stored position), and the offline QQQ backtest.
 
 ## Layout
 
 ```
-config.yaml        # mix, band, trend flag, cash buffer, risk caps
-strategy.py        # target weights + SMA filter
-rebalance.py       # current vs target → order intents
-broker_alpaca.py   # paper-only wrapper (account, positions, submit/cancel, retries)
-risk.py            # size / turnover / kill switch
-store.py           # SQLite: orders, fills, targets, equity, B&H benchmark
-notifier.py        # Discord / email / no-op
-backtest.py        # research engine
-run.py             # cron/Actions entrypoint
-report.py          # weekly summary
+config.yaml           # strategy selector, $100 cap, QQQ rule, leftover ETF mix
+momentum.py           # Donchian entry / trail / time-stop
+run_momentum.py       # daily paper runner
+market_clock.py       # 15:50 ET window, holidays, early closes, DST
+backtest_momentum.py  # 2005–2026 QQQ tuned backtest
+strategy.py / rebalance.py / backtest.py   # original ETF path (non-default)
+broker_alpaca.py      # paper-only wrapper + clock/calendar
+risk.py               # kill switch, $1 min, cap+P&L, daily loss
+store.py              # SQLite: orders, sleeve, QQQ B&H, closed trades
+run.py                # dispatches on config.strategy
+report.py             # weekly bot vs hold + win rate
 ```
-
-## What you still need to wire up
-
-- Alpaca **paper** keys in `.env` (or Actions secrets) before `--paper` or `--submit` will talk to the API
-- Optional Discord webhook or SMTP for alerts
-- A host for the cron line, or enable the commented `schedule:` in the Actions workflow after secrets are set
-- Several paper months before even *considering* live trading — and live trading is intentionally not implemented

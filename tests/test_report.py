@@ -19,3 +19,5 @@ def test_weekly_summary_vs_benchmark(tmp_path):
     assert "Buy & hold mix:" in text
     assert "Last week" in text
     assert "+2.00%" in text
+    assert "Closed trades:" in text
+    assert "Win rate:" in text
