@@ -1,44 +1,51 @@
-# Personal paper-trading ETF rebalancer. Edit weights and bands here.
-# Secrets never live in this file — use environment variables only.
+# Paper-only bot. Secrets never live in this file.
+
+# Selectable strategy. "qqq_momentum" is the live (paper) default.
+# "etf_rebalance" keeps the original VTI/VXUS/BND month-end rebalancer.
+strategy: qqq_momentum
 
 paper_base_url: https://paper-api.alpaca.markets
 
+# Hard sleeve cap. Tradable cash = cap + realized P&L of this bot
+# (gains compound). The paper account's leftover ~$99,900 is ignored.
+capital_cap_usd: 100.0
+min_trade_notional: 1.0
+
+qqq_momentum:
+  symbol: QQQ
+  lookback_days: 20          # buy when today's close > max of prior 20 closes
+  trail_pct: 0.05            # sell if close is 5%+ below the high close since entry
+  max_hold_days: 20          # time stop: 20 trading days after entry
+  evaluate_et: "15:50"       # near the regular-session close (America/New_York)
+  evaluate_window_minutes: 20
+  skip_early_closes: true
+  slippage_bps: 2.5          # backtest assumption, per side
+
+# --- etf_rebalance (non-default; used only when strategy: etf_rebalance) ---
 target_weights:
   VTI: 0.55
   VXUS: 0.25
   BND: 0.20
-
-# Month-end check: rebalance the whole book if any fund is more than
-# this many percentage points away from its target weight.
 rebalance_band_pp: 5.0
-
-# Single on/off flag. When enabled, a month-end VTI close below its
-# 200-day SMA moves the book to 100% BND until a later month-end close
-# is back above the SMA.
 trend_filter:
   enabled: true
   sma_days: 200
   signal_ticker: VTI
   risk_off_ticker: BND
-
-# Leave a little cash uninvested so tiny drifts and settlement don't
-# force trades, and skip legs smaller than min_trade_notional.
 cash_buffer_pct: 0.01
-min_trade_notional: 50.0
 
 risk:
-  # Dollar cap on a single order. Full risk-off rotations can be large.
-  max_order_notional: 200000.0
-  # Combined |buy| + |sell| notional / equity. 2.0 allows a 100% rotation.
+  max_order_notional_pct: 1.0   # never more than cap+sleeve P&L in one order
+  max_order_notional: 200000.0  # hard dollar cap used by the ETF path
+  max_daily_loss_pct: 1.0       # block new risk if realized sleeve loss today >= this
   max_daily_turnover_pct: 2.0
   kill_switch_file: .killswitch
 
-timezone: America/Los_Angeles
+timezone: America/New_York
 db_path: data/trader.db
 
-# Backtest defaults (must stay aligned with the attached research run).
 backtest:
-  start_capital: 100000.0
-  slippage_bps: 5.0
-  execution_lag_days: 1
-  rf_ticker: "^IRX"
+  start_capital: 100.0
+  slippage_bps: 2.5
+  start: "2005-01-03"
+  end: "2026-09-30"

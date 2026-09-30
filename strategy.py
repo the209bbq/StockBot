@@ -34,7 +34,7 @@ def band_breached(current_weights: dict[str, float], target_weights: dict[str, f
 
 def risk_off_weights(cfg: Config) -> dict[str, float]:
     ticker = cfg.trend_filter.risk_off_ticker
-    return {symbol: (1.0 if symbol == ticker else 0.0) for symbol in cfg.symbols}
+    return {symbol: (1.0 if symbol == ticker else 0.0) for symbol in cfg.target_weights}
 
 
 def decide(

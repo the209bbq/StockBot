@@ -17,7 +17,8 @@ def test_main_dry_run_works_without_keys(tmp_path, monkeypatch, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "mock broker" in out.lower()
-    assert "VTI" in out
+    assert "QQQ" in out
+    assert "prior_20d_high" in out
 
 
 def test_main_rejects_live_flag(capsys):

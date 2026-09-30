@@ -228,6 +228,21 @@ class AlpacaBroker:
         except Exception:
             return pd.Series(dtype=float, name=symbol)
 
+    def get_clock(self) -> dict[str, Any]:
+        clock = with_backoff(lambda: self._trading.get_clock(), sleep=self._sleep)
+        return {
+            "is_open": bool(getattr(clock, "is_open", False)),
+            "timestamp": getattr(clock, "timestamp", None),
+            "next_open": getattr(clock, "next_open", None),
+            "next_close": getattr(clock, "next_close", None),
+        }
+
+    def get_calendar(self, start, end) -> list[Any]:
+        from alpaca.trading.requests import GetCalendarRequest
+
+        req = GetCalendarRequest(start=start, end=end)
+        return list(with_backoff(lambda: self._trading.get_calendar(req), sleep=self._sleep))
+
     def submit_order(self, intent: OrderIntent, *, client_order_id: str) -> dict[str, Any]:
         from alpaca.common.exceptions import APIError
         from alpaca.trading.enums import OrderSide, TimeInForce
@@ -312,7 +327,12 @@ class MockBroker:
         prices: dict[str, float] | None = None,
         daily_closes: dict[str, pd.Series] | None = None,
     ) -> None:
-        self.positions = positions or drifted_demo_positions()
+        self.positions = drifted_demo_positions() if positions is None else positions
+        self.clock: dict[str, Any] = {
+            "is_open": True,
+            "next_close": None,
+        }
+        self.calendar_rows: list[Any] = []
         self.prices = prices or {s: p.current_price for s, p in self.positions.items()}
         pos_value = sum(p.market_value for p in self.positions.values())
         self.account = AccountSnapshot(
@@ -320,7 +340,11 @@ class MockBroker:
             equity=equity if equity is not None else pos_value + cash,
             buying_power=cash + pos_value,
         )
-        self.daily_closes = daily_closes or demo_closes_above_sma()
+        self.daily_closes = dict(daily_closes or demo_closes_above_sma())
+        if "QQQ" not in self.daily_closes:
+            self.daily_closes["QQQ"] = demo_qqq_closes()
+        if "QQQ" not in self.prices:
+            self.prices["QQQ"] = float(self.daily_closes["QQQ"].iloc[-1])
         self.submitted = []
         self.canceled = []
 
@@ -338,14 +362,20 @@ class MockBroker:
         return series.tail(limit)
 
     def submit_order(self, intent: OrderIntent, *, client_order_id: str) -> dict[str, Any]:
+        px = self.prices.get(intent.symbol) or 0.0
+        qty = intent.qty
+        if qty is None and px:
+            qty = (intent.notional or 0.0) / px
         record = {
             "id": f"mock-{len(self.submitted) + 1}",
             "client_order_id": client_order_id,
             "symbol": intent.symbol,
             "side": intent.side,
             "notional": intent.notional,
-            "qty": intent.qty,
+            "qty": qty,
             "status": "accepted",
+            "filled_qty": qty,
+            "filled_avg_price": px or None,
         }
         self.submitted.append(record)
         return record
@@ -358,6 +388,12 @@ class MockBroker:
             if rec["client_order_id"] == client_order_id:
                 return rec
         return None
+
+    def get_clock(self) -> dict[str, Any]:
+        return dict(self.clock)
+
+    def get_calendar(self, start, end) -> list[Any]:
+        return list(self.calendar_rows)
 
 
 def drifted_demo_positions() -> dict[str, Position]:
@@ -379,8 +415,31 @@ def drifted_demo_positions() -> dict[str, Position]:
     return out
 
 
+def _yfinance_closes(symbol: str, limit: int = 250) -> pd.Series:
+    try:
+        import yfinance as yf
+    except ImportError:
+        return pd.Series(dtype=float, name=symbol)
+    df = yf.download(symbol, period="2y", auto_adjust=True, progress=False)
+    if df is None or df.empty:
+        return pd.Series(dtype=float, name=symbol)
+    s = df["Close"]
+    if isinstance(s, pd.DataFrame):
+        s = s.iloc[:, 0]
+    s = s.dropna()
+    s.name = symbol
+    return s.tail(limit)
+
+
+def demo_qqq_closes(days: int = 40, last: float = 480.0) -> pd.Series:
+    """Synthetic QQQ series whose last print breaks the prior 20-day high."""
+    idx = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=days)
+    values = [400.0 + 0.4 * i for i in range(days - 1)] + [last]
+    return pd.Series(values, index=idx, name="QQQ")
+
+
 def demo_closes_above_sma(symbol: str = "VTI", days: int = 250, last: float = 280.0) -> dict[str, pd.Series]:
-    """Synthetic uptrend so the default dry-run stays in risk-on mode."""
+    """Synthetic uptrend so the default ETF dry-run stays in risk-on mode."""
     idx = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=days)
     values = [last * (0.85 + 0.15 * (i / (days - 1))) for i in range(days)]
     series = pd.Series(values, index=idx, name=symbol)

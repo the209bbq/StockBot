@@ -27,10 +27,10 @@ def test_order_diff_sells_overweight_and_buys_underweight(cfg, drifted_positions
 
 
 def test_min_trade_size_skips_tiny_drift(cfg, on_target_positions):
-    # Nudge VTI by $20 — below the $50 min trade — without changing equity.
+    # Nudge VTI by $0.50 — below the $1 min trade — without changing equity.
     pos = dict(on_target_positions)
     vti = pos["VTI"]
-    pos["VTI"] = Position(vti.symbol, vti.qty, vti.market_value + 20, vti.avg_price, vti.current_price)
+    pos["VTI"] = Position(vti.symbol, vti.qty, vti.market_value + 0.50, vti.avg_price, vti.current_price)
     prices = {s: p.current_price for s, p in pos.items()}
     orders = plan_orders(
         positions=pos,

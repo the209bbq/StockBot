@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from report import summarize
+from report import build_latest, summarize, write_state_reports
 from store import Store
 
 
@@ -19,3 +19,24 @@ def test_weekly_summary_vs_benchmark(tmp_path):
     assert "Buy & hold mix:" in text
     assert "Last week" in text
     assert "+2.00%" in text
+    assert "Closed trades:" in text
+    assert "Win rate:" in text
+    payload = build_latest(
+        store,
+        {
+            "as_of": "2026-09-21",
+            "signal": {"action": "hold_flat", "close": 110.0, "prior_20d_high": 108.0},
+        },
+    )
+    assert abs(payload["returns"]["since_inception"]["bot"] - 0.02) < 1e-9
+    paths = write_state_reports(
+        store,
+        {
+            "as_of": "2026-09-21",
+            "action": "hold_flat",
+            "signal": {"close": 110.0, "prior_20d_high": 108.0},
+        },
+        tmp_path / "reports",
+    )
+    assert paths["latest_json"].exists()
+    assert "Close vs 20d high" in paths["weekly_md"].read_text()
